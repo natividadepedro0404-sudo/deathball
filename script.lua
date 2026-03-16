@@ -6,10 +6,10 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local RunService = game:GetService('RunService')
 
 getgenv().AutoParry_Enabled = false
-getgenv().Parry_Distance = 20
+getgenv().Parry_Distance = 4
 getgenv().Prediction_Enabled = true
 getgenv().Prediction_Factor = 0.15
-getgenv().Parry_Cooldown = 0.12
+getgenv().Parry_Cooldown = 0.1
 
 local BALL_NAME = "Part"
 local Ball = nil
