@@ -5,15 +5,23 @@ local Player = Players.LocalPlayer
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local RunService = game:GetService('RunService')
 
-getgenv().Trail_Ball_Enabled = false
-getgenv().self_effect_Enabled = false
-getgenv().Parry_Distance = 18
-getgenv().Spam_Distance  = 4
-getgenv().ParryMode = "simples"
+getgenv().AutoParry_Enabled = false
+getgenv().Parry_Distance = 20
+getgenv().Prediction_Enabled = true
+getgenv().Prediction_Factor = 0.15
+getgenv().Parry_Cooldown = 0.12
 
 local BALL_NAME = "Part"
+local Ball = nil
+local BallConnection = nil
+local LastParryTime = 0
+local isParryInProgress = false
 
-local function isTargetBall(instance)
+local BallVelocity = Vector3.new(0, 0, 0)
+local LastBallPos = nil
+local LastBallTime = tick()
+
+local function isRedDeathBall(instance)
     if instance.Name ~= BALL_NAME or not instance:IsA("MeshPart") then
         return false
     end
@@ -24,51 +32,67 @@ local function isTargetBall(instance)
     end
     
     local fillColor = highlight.FillColor
-    return fillColor.R > 0.8 and fillColor.G < 0.2 and fillColor.B < 0.2
+    return fillColor.R > 0.7 and fillColor.G < 0.4 and fillColor.B < 0.4
 end
 
-local Ball = nil
-local BallConnection = nil
-local ParryCooldown = false
-local SpamLoop = nil
-local IsSpamming = false
-
-local function stopSpam()
-    if SpamLoop then
-        SpamLoop:Disconnect()
-        SpamLoop = nil
-    end
-    IsSpamming = false
-end
-
-local function startSpam()
-    if IsSpamming then return end
-    IsSpamming = true
-    
-    -- ← aqui você pode adicionar um tempo mínimo antes de permitir spam novamente depois de parar
-    SpamLoop = RunService.Heartbeat:Connect(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-        task.wait(0.008)   -- ← diminua se quiser mais rápido, mas cuidado com kick
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
-        task.wait(0.008)
-    end)
-end
-
-local LastParryTime = 0
-local MIN_PARRY_INTERVAL = 0.24   -- ajuste aqui
-
-local function doSingleParry()
+local function doParry()
     local now = tick()
-    if now - LastParryTime < MIN_PARRY_INTERVAL then
-        return
-    end
     
+    if isParryInProgress then return end
+    if now - LastParryTime < getgenv().Parry_Cooldown then return end
+    
+    isParryInProgress = true
     LastParryTime = now
     
     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-    task.wait(0.035)
+    task.wait(0.02)
     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+    
+    task.delay(getgenv().Parry_Cooldown, function()
+        isParryInProgress = false
+    end)
+    
 end
+
+local function updateBallVelocity(ball)
+    if not ball then return end
+    
+    local currentTime = tick()
+    local currentPos = ball.Position
+    
+    if LastBallPos and LastBallTime then
+        local deltaTime = currentTime - LastBallTime
+        if deltaTime > 0 and deltaTime < 0.1 then
+            BallVelocity = (currentPos - LastBallPos) / deltaTime
+        end
+    end
+    
+    LastBallPos = currentPos
+    LastBallTime = currentTime
+end
+
+local function predictPosition(ball, currentPos)
+    if not getgenv().Prediction_Enabled then
+        return currentPos
+    end
+    
+    local speed = BallVelocity.Magnitude
+    
+    if speed < 50 then
+        return currentPos
+    end
+    
+    local predTime = getgenv().Prediction_Factor
+    if speed > 300 then
+        predTime = predTime * 1.5
+    elseif speed > 200 then
+        predTime = predTime * 1.3
+    end
+    
+    return currentPos + (BallVelocity * predTime)
+end
+
+local LastParryDistance = 0
 
 local function monitorBall(ball)
     if not ball then return end
@@ -78,72 +102,71 @@ local function monitorBall(ball)
         BallConnection = nil
     end
     
+    BallVelocity = Vector3.new(0, 0, 0)
+    LastBallPos = ball.Position
+    LastBallTime = tick()
+    
     BallConnection = ball:GetPropertyChangedSignal("Position"):Connect(function()
-        if not ball or not ball.Parent then 
-            BallConnection:Disconnect()
-            BallConnection = nil
-            Ball = nil
-            stopSpam()
-            return 
-        end
-        
-        if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then 
-            return 
-        end
-        
-        local ballPos = ball.Position
-        local playerPos = Player.Character.HumanoidRootPart.Position
-        local distance = (playerPos - ballPos).Magnitude
-        
-        local speed = ball.AssemblyLinearVelocity.Magnitude
-        
-        local baseParry = getgenv().Parry_Distance or 18
-        local baseSpam  = getgenv().Spam_Distance or 12
-        
-        local dynamicParry = baseParry
-        local dynamicSpam  = baseSpam
-        
-        if speed > 300 then
-            dynamicParry = baseParry + 15
-            dynamicSpam  = baseSpam + 15
-        elseif speed > 200 then
-            dynamicParry = baseParry + 10
-            dynamicSpam  = baseSpam + 10
-        elseif speed > 100 then
-            dynamicParry = baseParry + 6
-            dynamicSpam  = baseSpam + 6
-        elseif speed > 50 then
-            dynamicParry = baseParry + 3
-            dynamicSpam  = baseSpam + 3
-        end
-        
-        if getgenv().ParryMode == "simples" then
-            if distance <= dynamicParry 
-   			and (tick() - LastParryTime > 0.18)           -- não parry se acabou de parryar
-   			and ball.AssemblyLinearVelocity:Dot((playerPos - ballPos).Unit) > 0.4 then
-    			doSingleParry()
-			end
-        else
-            if distance <= dynamicSpam then
-                startSpam()
-            else
-                stopSpam()
+        if not ball or not ball.Parent then
+            if BallConnection then
+                BallConnection:Disconnect()
+                BallConnection = nil
             end
+            Ball = nil
+            return
+        end
+        
+        if not getgenv().AutoParry_Enabled then
+            return
+        end
+        
+        if not isRedDeathBall(ball) then
+            return
+        end
+        
+        if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then
+            return
+        end
+        
+        local currentPos = ball.Position
+        
+        updateBallVelocity(ball)
+        
+        local root = Player.Character.HumanoidRootPart
+        local playerPos = root.Position
+        
+        local realDistance = (playerPos - currentPos).Magnitude
+        
+        local effectiveDistance = realDistance
+        if getgenv().Prediction_Enabled then
+            local predictedPos = predictPosition(ball, currentPos)
+            effectiveDistance = (playerPos - predictedPos).Magnitude
+        end
+        
+        LastParryDistance = effectiveDistance
+        
+        if effectiveDistance <= getgenv().Parry_Distance and not isParryInProgress then
+            doParry()
         end
     end)
 end
 
-for _, child in pairs(workspace:GetChildren()) do
-    if isTargetBall(child) then
-        Ball = child
-        monitorBall(Ball)
-        break
+local function findBall()
+    for _, child in ipairs(workspace:GetChildren()) do
+        if isRedDeathBall(child) then
+            Ball = child
+            monitorBall(Ball)
+            return true
+        end
     end
+    return false
 end
 
+findBall()
+
 workspace.ChildAdded:Connect(function(child)
-    task.wait(0.1)
-    if isTargetBall(child) then
+    task.wait(0.05)
+    if isRedDeathBall(child) then
         Ball = child
         monitorBall(Ball)
     end
@@ -155,75 +178,52 @@ workspace.ChildRemoved:Connect(function(child)
             BallConnection:Disconnect()
             BallConnection = nil
         end
-        stopSpam()
         Ball = nil
     end
 end)
 
 task.spawn(function()
-    while task.wait(1) do
-        if not Ball or not Ball.Parent then
-            for _, child in pairs(workspace:GetChildren()) do
-                if isTargetBall(child) then
-                    Ball = child
-                    monitorBall(Ball)
-                    break
-                end
-            end
+    while true do
+        task.wait(0.5)
+        if getgenv().AutoParry_Enabled and (not Ball or not Ball.Parent) then
+            findBall()
         end
     end
 end)
 
-local function addTrail(ball)
-    if ball and ball:IsA("MeshPart") and not ball:FindFirstChild("BlackTrail") then
-        local att0 = Instance.new("Attachment")
-        att0.Position = Vector3.new(0, 0.5, 0)
-        att0.Parent = ball
-
-        local att1 = Instance.new("Attachment")
-        att1.Position = Vector3.new(0, -0.5, 0)
-        att1.Parent = ball
-
-        local trail = Instance.new("Trail")
-        trail.Name = "BlackTrail"
-        trail.Attachment0 = att0
-        trail.Attachment1 = att1
-        trail.Color = ColorSequence.new(Color3.new(0, 0, 0))
-        trail.Lifetime = 0.2
-        trail.Transparency = NumberSequence.new(0.2, 1)
-        trail.MinLength = 0.1
-        trail.Parent = ball
-    end
-end
-
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/natividadepedro0404-sudo/deathball/refs/heads/main/main.lua"))()
 local main = Library.new()
 
-local rage = main:create_tab('Auto Parry', 'rbxassetid://76499042599127')
-local Visual = main:create_tab('Visuals', 'rbxassetid://85168909131990')
+local tab = main:create_tab('Auto Parry', 'rbxassetid://76499042599127')
 
-local module = rage:create_module({
+local mainModule = tab:create_module({
     title = 'Auto Parry',
-    flag = 'Auto_Parry',
-    description = 'Auto Parry (Tecla F)',
+    flag = 'Auto_Parry_Exact',
+    description = 'Monitora mudança de POSIÇÃO da bola',
     section = 'left',
     callback = function(state)
+        getgenv().AutoParry_Enabled = state
         if not state then
             if BallConnection then
                 BallConnection:Disconnect()
                 BallConnection = nil
             end
-            stopSpam()
+        else
+            if Ball and Ball.Parent and isRedDeathBall(Ball) then
+                monitorBall(Ball)
+            else
+                findBall()
+            end
         end
     end
 })
 
-module:create_slider({
-    title = 'Distância Base (Auto Parry)',
+mainModule:create_slider({
+    title = 'Distância do Parry',
     flag = 'Parry_Distance',
-    maximum_value = 30,
-    minimum_value = 1,
-    value = 18,
+    maximum_value = 35,
+    minimum_value = 2,
+    value = 20,
     suffix = ' studs',
     round_number = true,
     callback = function(v)
@@ -231,35 +231,17 @@ module:create_slider({
     end
 })
 
-module:create_slider({
-    title = 'Distância do Spam',
-    flag = 'Spam_Distance',
-    maximum_value = 25,
-    minimum_value = 2,
-    value = 12,
-    suffix = ' studs',
-    round_number = true,
+mainModule:create_slider({
+    title = 'Cooldown',
+    flag = 'Parry_Cooldown',
+    maximum_value = 0.25,
+    minimum_value = 0.01,
+    value = 0.12,
+    suffix = ' segundos',
+    round_number = false,
     callback = function(v)
-        getgenv().Spam_Distance = v
-    end
-})
-
-local modeToggle = rage:create_module({
-    title = 'Modo Spam',
-    flag = 'Spam_Mode',
-    description = 'Ativar para spam rápido',
-    section = 'left',
-    callback = function(state)
-        if state then
-            getgenv().ParryMode = "spam"
-        else
-            getgenv().ParryMode = "simples"
-            stopSpam()
-        end
+        getgenv().Parry_Cooldown = v
     end
 })
 
 main:load()
-
-getgenv().Parry_Distance = 18
-getgenv().Spam_Distance  = 12
